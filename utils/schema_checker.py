@@ -8,7 +8,7 @@ Validates JSON files against the CONVERSATION_SCHEMA.md specification.
 import json
 import sys
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 from pathlib import Path
 from datetime import datetime
 

@@ -1,5 +1,4 @@
 import json
-import os
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
@@ -258,7 +257,7 @@ def main():
         print(f"Total messages: {stats['total_messages']}")
         print(f"Total OpenAI-compatible messages: {stats['total_openai_messages']}")
         print(f"Average messages per conversation: {stats['avg_messages_per_conversation']:.2f}")
-        print(f"\nConversations by type:")
+        print("\nConversations by type:")
         for chat_type, count in stats['conversations_by_type'].items():
             print(f"  {chat_type}: {count}")
 

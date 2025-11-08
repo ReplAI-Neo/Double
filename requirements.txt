@@ -1,2 +1,4 @@
 beautifulsoup4==4.12.3
 types-beautifulsoup4
+cryptography>=41.0.0
+

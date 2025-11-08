@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Parse iMessage HTML exports into universal conversation schema',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
+        epilog="""
 Examples:
   # Parse single file
   python imessage_parser.py file.html -o conversations.json
@@ -181,27 +181,27 @@ Examples:
   
   # Pretty print output
   python imessage_parser.py data/raw/imessage/ -o conversations.json --pretty
-        '''
+        """
     )
-    
+
     parser.add_argument(
         'input_path',
         help='Path to HTML file or folder containing HTML files'
     )
-    
+
     parser.add_argument(
         '-o', '--output',
         required=True,
         help='Output JSON file',
         metavar='FILE'
     )
-    
+
     parser.add_argument(
         '--pretty',
         action='store_true',
         help='Pretty print JSON output with indentation'
     )
-    
+
     args = parser.parse_args()
     
     try:
@@ -257,4 +257,3 @@ Examples:
 
 if __name__ == '__main__':
     main()
-

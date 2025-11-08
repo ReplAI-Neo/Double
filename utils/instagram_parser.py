@@ -2,15 +2,17 @@
 """
 Parse Instagram message data into OpenAI-compatible chat format.
 
-This script recursively finds all message.json files in subdirectories,
-parses them, and converts them to the OpenAI chat format (for training).
+Parses Instagram message data into a standardized schema compatible with
+Discord, iMessage, and Instagram formats.
 """
 
 import json
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import argparse
+from encryption_utils import generate_encryption_key, encrypt_file
 
 
 def fix_instagram_encoding(text: str) -> str:
@@ -19,10 +21,8 @@ def fix_instagram_encoding(text: str) -> str:
     Instagram exports UTF-8 text but represents it as Latin-1.
     """
     try:
-        # Convert the incorrectly decoded string back to bytes, then decode properly
         return text.encode("latin1").decode("utf-8")
     except (UnicodeDecodeError, UnicodeEncodeError):
-        # If conversion fails, return original text
         return text
 
 
@@ -31,115 +31,186 @@ def parse_message_file(
     user_name: str,
     start_time_ms: Optional[int] = None,
     end_time_ms: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> Optional[Dict[str, Any]]:
     """
-    Parse a single Instagram message.json file and convert to OpenAI format.
+    Parse a single Instagram message.json file into universal conversation schema.
 
     Args:
-        file_path: Path to the message.json file
-        user_name: The name of the user (to identify which messages are from "assistant" role)
-        start_time_ms: Optional start timestamp in milliseconds (inclusive)
-        end_time_ms: Optional end timestamp in milliseconds (inclusive)
+        file_path: Path to message.json file
+        user_name: User's display name (case-insensitive)
+        start_time_ms: Optional start time filter (Unix ms)
+        end_time_ms: Optional end time filter (Unix ms)
 
     Returns:
-        List of message dictionaries in OpenAI format
+        Conversation object matching universal schema, or None if no valid messages
     """
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    [p["name"] for p in data.get("participants", [])]
-    messages = data.get("messages", [])
+    # Extract participants
+    participants_data = data.get("participants", [])
+    all_participants = [
+        fix_instagram_encoding(p.get("name", "")) for p in participants_data
+    ]
 
-    # Filter and convert messages
+    # Get conversation name from folder
+    conversation_name = file_path.parent.name
+
+    # Get messages
+    messages_data = data.get("messages", [])
+
+    # Sort by timestamp (oldest first)
+    sorted_messages = sorted(messages_data, key=lambda x: x.get("timestamp_ms", 0))
+
     openai_messages = []
+    full_metadata_messages = []
+    timestamps = []
+    authors = set()
 
-    # Sort messages by timestamp (oldest first)
-    sorted_messages = sorted(messages, key=lambda x: x.get("timestamp_ms", 0))
+    for idx, msg in enumerate(sorted_messages):
+        timestamp_ms = msg.get("timestamp_ms", 0)
 
-    for msg in sorted_messages:
-        # Filter by time range if specified
-        timestamp = msg.get("timestamp_ms", 0)
-        if start_time_ms and timestamp < start_time_ms:
+        # Apply time filters
+        if start_time_ms and timestamp_ms < start_time_ms:
             continue
-        if end_time_ms and timestamp > end_time_ms:
-            continue
-
-        # Skip messages without content or with generic content
-        content = msg.get("content", "").strip()
-        if not content or content == "Liked a message":
+        if end_time_ms and timestamp_ms > end_time_ms:
             continue
 
-        # Fix encoding issues
+        # Get message content
+        content = msg.get("content")
+        if not content:
+            continue
+
         content = fix_instagram_encoding(content)
+
+        # Filter out system messages
+        if content == "Liked a message" or not content.strip():
+            continue
+
+        # Get sender
         sender = fix_instagram_encoding(msg.get("sender_name", ""))
+        authors.add(sender)
 
-        # Determine role (user is the assistant being trained, others are users)
-        if sender.lower() == user_name.lower():
-            role = "assistant"
-        else:
-            role = "user"
+        # Determine role
+        role = "assistant" if sender.lower() == user_name.lower() else "user"
 
-        openai_messages.append(
+        # Convert timestamp to ISO format
+        timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        timestamp_iso = timestamp_dt.isoformat()
+        timestamps.append(timestamp_dt)
+
+        # Create message ID
+        message_id = f"ig_{conversation_name}_{timestamp_ms}_{idx}"
+
+        # Add to full metadata
+        full_metadata_messages.append(
             {
-                "role": role,
+                "message_id": message_id,
+                "timestamp": timestamp_iso,
                 "content": content,
-                "metadata": {
-                    "sender": sender,
-                    "timestamp_ms": msg.get("timestamp_ms"),
-                    "conversation": str(file_path.parent.name),
-                },
+                "author": sender,
             }
         )
 
-    return openai_messages
+        # Add to OpenAI messages
+        openai_messages.append({"role": role, "content": content})
+
+    if not full_metadata_messages:
+        return None
+
+    # Determine recipients (everyone except user)
+    recipients = [author for author in authors if author.lower() != user_name.lower()]
+
+    # Determine chat type
+    chat_type = "direct" if len(all_participants) <= 2 else "group"
+
+    # Get first and last timestamps
+    first_timestamp = timestamps[0].isoformat() if timestamps else None
+    last_timestamp = timestamps[-1].isoformat() if timestamps else None
+
+    return {
+        "openai_messages": openai_messages,
+        "full_metadata_messages": full_metadata_messages,
+        "first_message_timestamp": first_timestamp,
+        "last_message_timestamp": last_timestamp,
+        "recipients": recipients,
+        "num_participants": len(all_participants),
+        "total_messages": len(full_metadata_messages),
+        "source": "instagram",
+        "chat_type": chat_type,
+    }
 
 
-def find_all_message_files(root_dir: str) -> List[Path]:
+def parse_all_messages(
+    root_dir: str,
+    user_name: str,
+    start_time_ms: Optional[int] = None,
+    end_time_ms: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
-    Recursively find all message.json files in the directory.
+    Parse all Instagram message files in a directory.
 
     Args:
-        root_dir: Root directory to search
+        root_dir: Root directory containing message folders
+        user_name: User's display name
+        start_time_ms: Optional start time filter
+        end_time_ms: Optional end time filter
 
     Returns:
-        List of Path objects to message.json files
+        List of conversation objects
     """
     root_path = Path(root_dir)
-    return list(root_path.rglob("message*.json"))
+    conversations = []
+
+    # Find all message.json files
+    message_files = list(root_path.glob("**/message.json"))
+
+    if not message_files:
+        print(f"No message.json files found in {root_dir}")
+        return []
+
+    print(f"Found {len(message_files)} message file(s)")
+
+    for msg_file in message_files:
+        try:
+            print(f"  Processing: {msg_file.parent.name}...", end=" ")
+
+            conversation = parse_message_file(
+                msg_file, user_name, start_time_ms, end_time_ms
+            )
+
+            if conversation:
+                conversations.append(conversation)
+                print(f"✓ {conversation['total_messages']} messages")
+            else:
+                print("✗ No valid messages")
+
+        except Exception as e:
+            print(f"✗ Error: {e}")
+            continue
+
+    return conversations
 
 
 def parse_date_to_ms(date_str: str) -> int:
-    """
-    Convert a date string to milliseconds timestamp.
-
-    Supports formats:
-    - ISO date: "2024-01-15" or "2024-01-15T10:30:00"
-    - Unix timestamp in seconds: "1705334400"
-    - Unix timestamp in milliseconds: "1705334400000"
-
-    Args:
-        date_str: Date string to parse
-
-    Returns:
-        Timestamp in milliseconds
-    """
-    # Try parsing as unix timestamp (seconds or milliseconds)
-    if date_str.isdigit():
-        timestamp = int(date_str)
-        # If it looks like seconds (less than year 3000 in seconds), convert to ms
-        if timestamp < 32503680000:
-            return timestamp * 1000
-        return timestamp
-
-    # Try parsing as ISO date
+    """Parse date string to Unix timestamp in milliseconds."""
     import calendar
 
     try:
-        # Try parsing as ISO datetime
-        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        # Try as unix timestamp (seconds)
+        timestamp = float(date_str)
+        # If < 10 billion, assume seconds; otherwise milliseconds
+        if timestamp < 10000000000:
+            return int(timestamp * 1000)
+        return int(timestamp)
+    except ValueError:
+        pass
 
-        # If timezone-naive, treat as UTC (Instagram uses UTC)
+    # Try ISO format
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
+            # Treat as UTC
             return int(calendar.timegm(dt.timetuple()) * 1000)
         else:
             return int(dt.timestamp() * 1000)
@@ -150,160 +221,81 @@ def parse_date_to_ms(date_str: str) -> int:
         )
 
 
-def parse_all_messages(
-    root_dir: str,
-    user_name: str,
-    output_format: str = "combined",
-    output_dir: str = "output",
-    start_time_ms: Optional[int] = None,
-    end_time_ms: Optional[int] = None,
-) -> None:
-    """
-    Parse all Instagram messages and save to OpenAI format.
-
-    Args:
-        root_dir: Root directory containing message folders
-        user_name: The user's name in the messages
-        output_format: Either "combined" (all conversations in one file) or
-                      "separate" (one file per conversation)
-        output_dir: Directory to save output files
-        start_time_ms: Optional start timestamp in milliseconds (inclusive)
-        end_time_ms: Optional end timestamp in milliseconds (inclusive)
-    """
-    message_files = find_all_message_files(root_dir)
-
-    if not message_files:
-        print(f"No message.json files found in {root_dir}")
-        return
-
-    print(f"Found {len(message_files)} message file(s)")
-
-    # Create output directory
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
-
-    if output_format == "combined":
-        # Combine all messages into a single conversation
-        all_messages = []
-
-        for msg_file in message_files:
-            print(f"Processing: {msg_file}")
-            try:
-                messages = parse_message_file(
-                    msg_file, user_name, start_time_ms, end_time_ms
-                )
-                all_messages.extend(messages)
-            except Exception as e:
-                print(f"Error processing {msg_file}: {e}")
-
-        # Sort all messages by timestamp
-        all_messages.sort(key=lambda x: x.get("metadata", {}).get("timestamp_ms", 0))
-
-        # Create output structure
-        output_data = {
-            "messages": [
-                {"role": msg["role"], "content": msg["content"]} for msg in all_messages
-            ],
-        }
-
-        # Save to file
-        output_file = output_path / "all_messages_combined.json"
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
-
-        print(f"\nSaved combined messages to: {output_file}")
-        print(f"Total messages: {len(all_messages)}")
-
-    else:
-        # Save each conversation separately
-        conversation_stats = []
-
-        for msg_file in message_files:
-            print(f"Processing: {msg_file}")
-            try:
-                messages = parse_message_file(
-                    msg_file, user_name, start_time_ms, end_time_ms
-                )
-
-                if not messages:
-                    print("  -> No valid messages found, skipping")
-                    continue
-
-                # Create output structure
-                output_data = {
-                    "messages": [
-                        {"role": msg["role"], "content": msg["content"]}
-                        for msg in messages
-                    ],
-                }
-
-                # Create safe filename
-                conversation_name = msg_file.parent.name
-                safe_name = "".join(
-                    c if c.isalnum() or c in ("-", "_") else "_"
-                    for c in conversation_name
-                )
-                output_file = output_path / f"{safe_name}.json"
-
-                with open(output_file, "w", encoding="utf-8") as f:
-                    json.dump(output_data, f, indent=2, ensure_ascii=False)
-
-                conversation_stats.append(
-                    {
-                        "name": conversation_name,
-                        "file": output_file,
-                        "count": len(messages),
-                    }
-                )
-
-                print(f"  -> Saved {len(messages)} messages to: {output_file}")
-
-            except Exception as e:
-                print(f"  -> Error: {e}")
-
-        print(f"\n{'=' * 60}")
-        print("Summary:")
-        print(f"Processed {len(conversation_stats)} conversation(s)")
-        for stat in conversation_stats:
-            print(f"  - {stat['name']}: {stat['count']} messages")
-
-
 def main():
     """Main entry point with command-line interface."""
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="Parse Instagram messages into OpenAI chat format"
+        description="Parse Instagram messages into universal conversation schema"
     )
+
     parser.add_argument(
-        "input_dir", help="Root directory containing Instagram message folders"
+        "input_dir",
+        nargs="?",
+        help="Root directory containing Instagram message folders",
     )
+
     parser.add_argument(
         "--user-name",
-        required=True,
         help="Your name as it appears in Instagram messages (case-insensitive)",
     )
+
     parser.add_argument(
-        "--format",
-        choices=["combined", "separate"],
-        default="separate",
-        help="Output format: combined (all in one file) or separate (one per conversation)",
+        "-o",
+        "--output",
+        help="Output JSON file",
+        metavar="FILE",
     )
-    parser.add_argument(
-        "--output-dir",
-        default="output",
-        help="Directory to save output files (default: output)",
-    )
+
     parser.add_argument(
         "--start-time",
-        help="Start time filter (format: YYYY-MM-DD or unix timestamp)",
+        help="Only include messages from this date onward (ISO format or unix timestamp)",
     )
+
     parser.add_argument(
         "--end-time",
-        help="End time filter (format: YYYY-MM-DD or unix timestamp)",
+        help="Only include messages up to this date (ISO format or unix timestamp)",
+    )
+
+    parser.add_argument(
+        "--pretty", action="store_true", help="Pretty print JSON output"
+    )
+
+    parser.add_argument(
+        "--encrypt",
+        action="store_true",
+        help="Encrypt output file with AES-256",
+    )
+
+    parser.add_argument(
+        "--encryption-key",
+        help="Encryption key (base64-encoded). If not provided with --encrypt, generates new key.",
+    )
+
+    parser.add_argument(
+        "--generate-key",
+        action="store_true",
+        help="Generate a new encryption key and exit",
     )
 
     args = parser.parse_args()
+
+    # Handle key generation mode
+    if args.generate_key:
+        key = generate_encryption_key()
+        print("Generated encryption key (save this securely!):")
+        print(key)
+        print("\nUse this key with: --encryption-key YOUR_KEY")
+        print("Keep this key safe! You'll need it to decrypt your data.")
+        return
+
+    # Validate required arguments when not generating key
+    if not args.input_dir:
+        parser.error("input_dir is required (unless using --generate-key)")
+
+    if not args.user_name:
+        parser.error("--user-name is required (unless using --generate-key)")
+
+    if not args.output:
+        parser.error("-o/--output is required (unless using --generate-key)")
 
     if not os.path.exists(args.input_dir):
         print(f"Error: Directory '{args.input_dir}' does not exist")
@@ -316,9 +308,6 @@ def main():
     if args.start_time:
         try:
             start_time_ms = parse_date_to_ms(args.start_time)
-            start_date = datetime.fromtimestamp(start_time_ms / 1000).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
         except ValueError as e:
             print(f"Error: {e}")
             return
@@ -326,32 +315,78 @@ def main():
     if args.end_time:
         try:
             end_time_ms = parse_date_to_ms(args.end_time)
-            end_date = datetime.fromtimestamp(end_time_ms / 1000).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
         except ValueError as e:
             print(f"Error: {e}")
             return
 
-    print(f"Parsing Instagram messages from: {args.input_dir}")
+    # Handle encryption key
+    encryption_key = None
+    if args.encrypt:
+        if args.encryption_key:
+            encryption_key = args.encryption_key
+        else:
+            encryption_key = generate_encryption_key()
+            print("\n" + "=" * 60)
+            print("🔑 GENERATED NEW ENCRYPTION KEY (SAVE THIS SECURELY!):")
+            print(encryption_key)
+            print("=" * 60)
+            print("⚠️  You MUST save this key to decrypt your data later!")
+            print("=" * 60 + "\n")
+
+    # Parse messages
+    print(f"\nParsing Instagram messages from: {args.input_dir}")
     print(f"User name: {args.user_name}")
-    print(f"Output format: {args.format}")
-    print(f"Output directory: {args.output_dir}")
     if start_time_ms:
-        print(f"Start time: {start_date}")
+        print(
+            f"Start time: {datetime.fromtimestamp(start_time_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
     if end_time_ms:
-        print(f"End time: {end_date}")
+        print(
+            f"End time: {datetime.fromtimestamp(end_time_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    print(f"Encryption: {'ENABLED' if encryption_key else 'disabled'}")
     print("=" * 60)
 
-    parse_all_messages(
+    conversations = parse_all_messages(
         args.input_dir,
-        user_name=args.user_name,
-        output_format=args.format,
-        output_dir=args.output_dir,
-        start_time_ms=start_time_ms,
-        end_time_ms=end_time_ms,
+        args.user_name,
+        start_time_ms,
+        end_time_ms,
     )
 
+    if not conversations:
+        print("\nNo conversations were parsed")
+        return
+
+    # Write output
+    output_path = Path(args.output)
+    with open(output_path, "w", encoding="utf-8") as f:
+        if args.pretty:
+            json.dump(conversations, f, indent=2, ensure_ascii=False)
+        else:
+            json.dump(conversations, f, ensure_ascii=False)
+
+    # Encrypt if requested
+    if encryption_key:
+        try:
+            encrypt_file(output_path, encryption_key)
+            print(
+                f"\n✓ Successfully parsed and encrypted {len(conversations)} conversation(s)"
+            )
+        except Exception as e:
+            print(f"\n✓ Successfully parsed {len(conversations)} conversation(s)")
+            print(f"✗ Encryption failed: {e}")
+    else:
+        print(f"\n✓ Successfully parsed {len(conversations)} conversation(s)")
+
+    # Print summary
+    total_messages = sum(conv["total_messages"] for conv in conversations)
+    total_openai_messages = sum(len(conv["openai_messages"]) for conv in conversations)
+
+    print(f"  Total conversations: {len(conversations)}")
+    print(f"  Total messages: {total_messages}")
+    print(f"  OpenAI messages: {total_openai_messages}")
+    print(f"  Output: {args.output}")
     print("\nDone!")
 
 
