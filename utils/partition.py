@@ -82,7 +82,7 @@ def find_split_points(full_metadata_messages: List[Dict[str, Any]], max_days: in
     return split_points
 
 
-def partition_conversation(conversation: Dict[str, Any], max_days: int) -> List[Dict[str, Any]]]:
+def partition_conversation(conversation: Dict[str, Any], max_days: int) -> List[Dict[str, Any]]:
     """
     Partition a single conversation into multiple conversations based on time gaps.
     
