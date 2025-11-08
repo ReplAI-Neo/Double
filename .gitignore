@@ -38,3 +38,9 @@ inbox/
 # Any JSON output files in root
 /*.json
 
+.env
+/*.html
+# Data directories
+data/**/*.html
+data/**/*.json
+

@@ -1,0 +1,142 @@
+{
+  "channel": {
+    "id": "987654321098765432",
+    "name": "general",
+    "type": "text"
+  },
+  "messages": [
+    {
+      "id": "1001",
+      "timestamp": "2024-01-15T10:00:00.000Z",
+      "author": {
+        "id": "123456789012345678",
+        "name": "Alice",
+        "discriminator": "1234",
+        "isBot": false
+      },
+      "content": "Hey everyone! How's it going?",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "name": "👋"
+          },
+          "count": 3
+        }
+      ]
+    },
+    {
+      "id": "1002",
+      "timestamp": "2024-01-15T10:05:00.000Z",
+      "author": {
+        "id": "234567890123456789",
+        "name": "Bob",
+        "discriminator": "5678",
+        "isBot": false
+      },
+      "content": "Doing great! Working on a cool project.",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": []
+    },
+    {
+      "id": "1003",
+      "timestamp": "2024-01-15T10:10:00.000Z",
+      "author": {
+        "id": "123456789012345678",
+        "name": "Alice",
+        "discriminator": "1234",
+        "isBot": false
+      },
+      "content": "That sounds awesome! What kind of project?",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": []
+    },
+    {
+      "id": "1004",
+      "timestamp": "2024-01-15T10:15:00.000Z",
+      "author": {
+        "id": "234567890123456789",
+        "name": "Bob",
+        "discriminator": "5678",
+        "isBot": false
+      },
+      "content": "Building an AI chatbot! It's been really fun learning about NLP.",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "name": "🤖"
+          },
+          "count": 2
+        },
+        {
+          "emoji": {
+            "name": "🔥"
+          },
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "1005",
+      "timestamp": "2024-01-15T10:20:00.000Z",
+      "author": {
+        "id": "345678901234567890",
+        "name": "Charlie",
+        "discriminator": "9012",
+        "isBot": false
+      },
+      "content": "NLP is fascinating! Have you tried using transformer models?",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": []
+    },
+    {
+      "id": "1006",
+      "timestamp": "2024-01-15T10:25:00.000Z",
+      "author": {
+        "id": "234567890123456789",
+        "name": "Bob",
+        "discriminator": "5678",
+        "isBot": false
+      },
+      "content": "Yes! I'm using GPT-based models. The results are impressive.",
+      "attachments": [
+        {
+          "id": "2001",
+          "filename": "model_results.png",
+          "url": "https://cdn.discordapp.com/attachments/..."
+        }
+      ],
+      "embeds": [],
+      "stickers": [],
+      "reactions": []
+    },
+    {
+      "id": "1007",
+      "timestamp": "2024-01-15T10:30:00.000Z",
+      "author": {
+        "id": "123456789012345678",
+        "name": "Alice",
+        "discriminator": "1234",
+        "isBot": false
+      },
+      "content": "I'd love to see a demo sometime!",
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": []
+    }
+  ]
+}
+
+
