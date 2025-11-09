@@ -58,6 +58,7 @@ fi
 echo "✓ Encryption complete"
 
 # Upload to Hugging Face as a dataset
+# NOTE: Change "Stephen-Xie/chat-dataset" to your own Hugging Face repository ID
 HF_TOKEN_VALUE=$(env | grep "^HF_TOKEN=" | cut -d= -f2- || echo "")
 if [ -z "$HF_TOKEN_VALUE" ]; then
     echo "Error: HF_TOKEN environment variable is not set"
