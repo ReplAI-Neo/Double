@@ -6,14 +6,14 @@ set -u  # Exit on undefined variable
 cd "$(dirname "$0")/.." || exit 1
 
 # Process conversations
-echo "Step 1/5: Processing conversations..."
+echo "Step 1/6: Processing conversations..."
 # bash utils/parse_discord.sh
 # bash utils/parse_imessage.sh
 # bash utils/parse_instagram.sh
 echo "✓ Processing complete"
 
 # Merge all processed conversations
-echo "Step 2/5: Merging conversations..."
+echo "Step 2/6: Merging conversations..."
 python utils/merge.py data/processed -o data/merged/all_conversations.json
 if [ ! -f "data/merged/all_conversations.json" ]; then
     echo "Error: merge failed - output file not found"
@@ -22,7 +22,7 @@ fi
 echo "✓ Merge complete"
 
 # Partition into training chunks
-echo "Step 3/5: Partitioning conversations..."
+echo "Step 3/6: Partitioning conversations..."
 python utils/partition.py data/merged/all_conversations.json -o data/merged/all_conversations_partitioned.json --max-days 2
 if [ ! -f "data/merged/all_conversations_partitioned.json" ]; then
     echo "Error: partition failed - output file not found"
@@ -31,7 +31,7 @@ fi
 echo "✓ Partition complete"
 
 # Filter conversations
-echo "Step 4/5: Filtering conversations..."
+echo "Step 4/6: Filtering conversations..."
 python utils/filter.py data/merged/all_conversations_partitioned.json data/merged/all_conversations_partitioned_filtered.json \
   --start-date "2023-01-01T00:00:00+00:00" \
   --end-date "2025-11-01T23:59:59+00:00" \
@@ -48,9 +48,22 @@ if [ ! -f "data/merged/all_conversations_partitioned_filtered.json" ]; then
 fi
 echo "✓ Filter complete"
 
+# Style-based selection
+echo "Step 5/6: Selecting stylistically aligned snippets..."
+python utils/style_filter.py \
+  data/merged/all_conversations_partitioned_filtered.json \
+  data/merged/all_conversations_style_selected.json \
+  --cache-dir data/style_cache \
+  --annotations-file data/merged/style_annotations.jsonl
+if [ ! -f "data/merged/all_conversations_style_selected.json" ]; then
+    echo "Error: style selection failed - output file not found"
+    exit 1
+fi
+echo "✓ Style selection complete"
+
 # Encrypt the data (auto-generates encryption key)
-echo "Step 5/5: Encrypting conversations..."
-python utils/encrypt_conversations.py --encrypt data/merged/all_conversations_partitioned_filtered.json -o data/merged/all_conversations_encrypted.json
+echo "Step 6/6: Encrypting conversations..."
+python utils/encrypt_conversations.py --encrypt data/merged/all_conversations_style_selected.json -o data/merged/all_conversations_encrypted.json
 if [ ! -f "data/merged/all_conversations_encrypted.json" ]; then
     echo "Error: encryption failed - output file not found"
     exit 1
