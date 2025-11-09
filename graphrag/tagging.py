@@ -29,6 +29,12 @@ from utils.filter import (  # noqa: F401 - re-exported helpers
     get_time_of_day_pacific,
 )
 
+try:
+    from transformers import pipeline
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
 
 PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
 
@@ -101,16 +107,52 @@ class ConversationAnnotation:
     emoji_density: float
     question_density: float
     dominant_time_bucket: Optional[str]
+    # Semantic tags
+    formality: Optional[str]  # formal, informal
+    information_content: Optional[str]  # informational, conversational
+    tone: Optional[str]  # humorous, serious, neutral
+    sentiment: Optional[str]  # empathetic, neutral, detached
+    friendliness: Optional[str]  # friendly, professional, neutral
+    purpose: Optional[str]  # technical_support, debugging, explanation, etc.
+    complexity: Optional[str]  # beginner, intermediate, advanced
+    resolution: Optional[str]  # resolved, unresolved, partial
+    engagement: Optional[str]  # high_back_and_forth, medium_interaction, low_interaction
+    content_type: List[str]  # contains_code, contains_error, contains_urls, text_only
+    domain: Optional[str]  # programming, data_science, web_dev, etc.
+    urgency: Optional[str]  # urgent, time_sensitive, normal
+    response_depth: Optional[str]  # detailed, moderate, brief
 
 
 class TagGenerator:
     """
     Generate derived tags for the unified conversation schema.
+    Supports both heuristic-based and ML-based (zero-shot) classification.
     """
 
-    def __init__(self, timezone_name: str = "America/Los_Angeles") -> None:
+    def __init__(
+        self, 
+        timezone_name: str = "America/Los_Angeles",
+        use_zero_shot: bool = True,
+        zero_shot_model: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli",
+        device: int = -1,
+    ) -> None:
         self.timezone_name = timezone_name
         self.local_tz = pytz.timezone(timezone_name)
+        self.use_zero_shot = use_zero_shot and TRANSFORMERS_AVAILABLE
+        self.classifier = None
+        
+        if self.use_zero_shot:
+            print(f"Loading zero-shot classifier '{zero_shot_model}'...")
+            self.classifier = pipeline(
+                "zero-shot-classification",
+                model=zero_shot_model,
+                device=device,
+            )
+            print(f"✓ Zero-shot classifier loaded")
+        else:
+            if use_zero_shot and not TRANSFORMERS_AVAILABLE:
+                print("⚠️  transformers not available, falling back to heuristics")
+            print("Using heuristic-based classification")
 
     def annotate_conversation(
         self, conversation: Dict[str, Any], conversation_id: Optional[str] = None
@@ -189,6 +231,21 @@ class TagGenerator:
         emoji_density = (emoji_count / total_messages) if total_messages else 0.0
         question_density = (question_count / total_messages) if total_messages else 0.0
 
+        # Apply semantic classifiers
+        formality = self._classify_formality(full_messages)
+        information_content = self._classify_information_content(full_messages, question_density)
+        tone = self._classify_tone(full_messages, emoji_density)
+        sentiment = self._classify_sentiment(full_messages)
+        friendliness = self._classify_friendliness(full_messages)
+        purpose = self._classify_purpose(full_messages, openai_messages)
+        complexity = self._classify_complexity(full_messages, assistant_avg_words)
+        resolution = self._classify_resolution(full_messages, openai_messages)
+        engagement = self._classify_engagement(total_messages, assistant_turn_ratio, duration_hours)
+        content_type = self._classify_content_type(full_messages)
+        domain = self._classify_domain(full_messages)
+        urgency = self._classify_urgency(full_messages)
+        response_depth = self._classify_response_depth(assistant_avg_words, total_messages)
+
         annotation = ConversationAnnotation(
             conversation_id=convo_id,
             participants=participants,
@@ -204,6 +261,20 @@ class TagGenerator:
             emoji_density=emoji_density,
             question_density=question_density,
             dominant_time_bucket=toc_counter.most_common(1)[0][0] if toc_counter else None,
+            # Semantic tags
+            formality=formality,
+            information_content=information_content,
+            tone=tone,
+            sentiment=sentiment,
+            friendliness=friendliness,
+            purpose=purpose,
+            complexity=complexity,
+            resolution=resolution,
+            engagement=engagement,
+            content_type=content_type,
+            domain=domain,
+            urgency=urgency,
+            response_depth=response_depth,
         )
 
         return annotation, message_annotations
@@ -229,6 +300,20 @@ class TagGenerator:
             "message_count": conv_annotation.message_count,
             "emoji_density": conv_annotation.emoji_density,
             "question_density": conv_annotation.question_density,
+            # Semantic tags
+            "formality": conv_annotation.formality,
+            "information_content": conv_annotation.information_content,
+            "tone": conv_annotation.tone,
+            "sentiment": conv_annotation.sentiment,
+            "friendliness": conv_annotation.friendliness,
+            "purpose": conv_annotation.purpose,
+            "complexity": conv_annotation.complexity,
+            "resolution": conv_annotation.resolution,
+            "engagement": conv_annotation.engagement,
+            "content_type": conv_annotation.content_type,
+            "domain": conv_annotation.domain,
+            "urgency": conv_annotation.urgency,
+            "response_depth": conv_annotation.response_depth,
         }
 
         enriched_messages: List[Dict[str, Any]] = []
@@ -292,6 +377,365 @@ class TagGenerator:
         if author in recipients:
             return "user"
         return "assistant"
+
+    # Helper for zero-shot classification ------------------------------------
+    def _zero_shot_classify(
+        self, 
+        text: str, 
+        candidate_labels: List[str],
+        max_length: int = 512,
+    ) -> str:
+        """
+        Use zero-shot classification to classify text into one of the candidate labels.
+        Returns the label with highest score.
+        """
+        if not self.classifier:
+            return candidate_labels[0]  # Fallback to first label
+        
+        # Truncate text to avoid token limits
+        if len(text) > max_length * 4:  # Rough char estimate
+            text = text[:max_length * 4]
+        
+        result = self.classifier(
+            text,
+            candidate_labels=candidate_labels,
+            multi_label=False,
+        )
+        return result['labels'][0]  # Return highest scoring label
+    
+    # Semantic tag classifiers -----------------------------------------------
+    def _classify_formality(self, messages: List[Dict[str, Any]]) -> str:
+        """Classify conversation formality."""
+        if not messages:
+            return "neutral"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["formal", "informal", "neutral"],
+            )
+        
+        # Fallback to heuristics
+        informal_markers = ["lol", "lmao", "omg", "btw", "idk", "nvm", "gonna", "wanna", "kinda"]
+        formal_markers = ["therefore", "furthermore", "regarding", "pursuant", "hereby", "shall"]
+        
+        text_lower = text.lower()
+        contractions = ["'ll", "'re", "'ve", "'d", "n't", "'m", "can't", "won't"]
+        contraction_count = sum(text_lower.count(c) for c in contractions)
+        
+        informal_score = sum(text_lower.count(marker) for marker in informal_markers) + (contraction_count * 0.5)
+        formal_score = sum(text_lower.count(marker) for marker in formal_markers)
+        
+        if informal_score > formal_score * 2:
+            return "informal"
+        elif formal_score > informal_score:
+            return "formal"
+        return "neutral"
+
+    def _classify_information_content(self, messages: List[Dict[str, Any]], question_density: float) -> str:
+        """Classify whether conversation is informational or conversational."""
+        if not messages:
+            return "conversational"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["informational", "conversational"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        info_keywords = ["how", "what", "why", "explain", "define", "tutorial", "learn"]
+        conv_keywords = ["thanks", "appreciate", "cool", "lol", "yeah", "ok"]
+        
+        info_score = sum(text_lower.count(keyword) for keyword in info_keywords)
+        conv_score = sum(text_lower.count(keyword) for keyword in conv_keywords)
+        
+        if question_density > 0.3 or info_score > conv_score * 1.5:
+            return "informational"
+        return "conversational"
+
+    def _classify_tone(self, messages: List[Dict[str, Any]], emoji_density: float) -> str:
+        """Classify conversational tone."""
+        if not messages:
+            return "neutral"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["humorous", "serious", "neutral"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        humor_markers = ["lol", "lmao", "haha", "rofl", "funny", "hilarious"]
+        serious_markers = ["critical", "important", "urgent", "serious", "concern", "issue"]
+        
+        humor_score = sum(text_lower.count(marker) for marker in humor_markers) + (emoji_density * 5)
+        serious_score = sum(text_lower.count(marker) for marker in serious_markers)
+        
+        if humor_score > 2:
+            return "humorous"
+        elif serious_score > humor_score * 2:
+            return "serious"
+        return "neutral"
+
+    def _classify_sentiment(self, messages: List[Dict[str, Any]]) -> str:
+        """Classify emotional sentiment of conversation."""
+        if not messages:
+            return "neutral"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["empathetic", "neutral", "detached"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        empathetic_markers = ["understand", "feel", "sorry", "appreciate", "help", "support"]
+        detached_markers = ["incorrect", "wrong", "error", "failed", "invalid"]
+        
+        emp_score = sum(text_lower.count(marker) for marker in empathetic_markers)
+        det_score = sum(text_lower.count(marker) for marker in detached_markers)
+        
+        if emp_score > 3:
+            return "empathetic"
+        elif det_score > emp_score * 2:
+            return "detached"
+        return "neutral"
+
+    def _classify_friendliness(self, messages: List[Dict[str, Any]]) -> str:
+        """Classify friendliness level."""
+        if not messages:
+            return "neutral"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["friendly", "professional", "neutral"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        friendly_markers = ["thanks", "appreciate", "great", "awesome", "nice"]
+        professional_markers = ["regarding", "kindly", "respectively", "accordingly"]
+        
+        friendly_score = sum(text_lower.count(marker) for marker in friendly_markers)
+        professional_score = sum(text_lower.count(marker) for marker in professional_markers)
+        
+        if friendly_score > 5:
+            return "friendly"
+        elif professional_score > friendly_score:
+            return "professional"
+        return "neutral"
+
+    def _classify_purpose(self, messages: List[Dict[str, Any]], openai_messages: List[Dict[str, Any]]) -> str:
+        """Classify the primary purpose of the conversation."""
+        if not messages:
+            return "general"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=[
+                    "debugging", "learning", "explanation", "code_review",
+                    "brainstorming", "technical_support", "general"
+                ],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        if any(keyword in text_lower for keyword in ["debug", "error", "bug", "traceback"]):
+            return "debugging"
+        elif any(keyword in text_lower for keyword in ["how do i", "how to", "tutorial", "learn"]):
+            return "learning"
+        elif any(keyword in text_lower for keyword in ["explain", "what is", "clarify"]):
+            return "explanation"
+        elif any(keyword in text_lower for keyword in ["help", "issue", "problem", "not working"]):
+            return "technical_support"
+        return "general"
+
+    def _classify_complexity(self, messages: List[Dict[str, Any]], avg_word_count: float) -> str:
+        """Classify technical complexity level."""
+        if not messages:
+            return "beginner"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["beginner", "intermediate", "advanced"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        advanced_terms = ["algorithm", "architecture", "asynchronous", "optimization", "scalability"]
+        beginner_terms = ["what is", "how do i", "beginner", "basic", "tutorial"]
+        
+        advanced_score = sum(text_lower.count(term) for term in advanced_terms)
+        beginner_score = sum(text_lower.count(term) for term in beginner_terms)
+        
+        if advanced_score > 2 or avg_word_count > 100:
+            return "advanced"
+        elif beginner_score > 2 or avg_word_count < 30:
+            return "beginner"
+        return "intermediate"
+
+    def _classify_resolution(self, messages: List[Dict[str, Any]], openai_messages: List[Dict[str, Any]]) -> str:
+        """Classify whether the conversation reached resolution."""
+        if not messages or not openai_messages:
+            return "unresolved"
+        
+        # Focus on last few messages
+        last_messages = messages[-3:] if len(messages) >= 3 else messages
+        text = " ".join(msg.get("content", "") for msg in last_messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["resolved", "unresolved", "partial"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        resolved_markers = ["works", "fixed", "solved", "thanks", "perfect", "got it"]
+        unresolved_markers = ["still", "doesn't work", "error", "confused"]
+        
+        resolved_score = sum(text_lower.count(marker) for marker in resolved_markers)
+        unresolved_score = sum(text_lower.count(marker) for marker in unresolved_markers)
+        
+        if resolved_score > unresolved_score * 2:
+            return "resolved"
+        elif unresolved_score > resolved_score:
+            return "unresolved"
+        return "partial"
+
+    @staticmethod
+    def _classify_engagement(message_count: int, turn_ratio: float, duration_hours: Optional[float]) -> str:
+        """Classify engagement level based on interaction patterns."""
+        # High back-and-forth: many messages, balanced turns, reasonable duration
+        if message_count > 20 and 30 < turn_ratio < 70:
+            return "high_back_and_forth"
+        elif message_count > 10 or (duration_hours and duration_hours > 1):
+            return "medium_interaction"
+        return "low_interaction"
+
+    @staticmethod
+    def _classify_content_type(messages: List[Dict[str, Any]]) -> List[str]:
+        """Identify types of content present in conversation."""
+        if not messages:
+            return ["text_only"]
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        content_types = []
+        
+        # Check for code blocks (markdown)
+        if "```" in text or "    " in text:  # code blocks or indented code
+            content_types.append("contains_code")
+        
+        # Check for errors
+        if any(keyword in text.lower() for keyword in ["error", "exception", "traceback", "failed", "warning"]):
+            content_types.append("contains_error")
+        
+        # Check for URLs
+        if "http://" in text or "https://" in text or "www." in text:
+            content_types.append("contains_urls")
+        
+        # Check for file references
+        if any(ext in text for ext in [".py", ".js", ".ts", ".java", ".cpp", ".md", ".json", ".yaml", ".txt"]):
+            content_types.append("contains_files")
+        
+        if not content_types:
+            content_types.append("text_only")
+        
+        return content_types
+
+    def _classify_domain(self, messages: List[Dict[str, Any]]) -> str:
+        """Classify knowledge domain of conversation."""
+        if not messages:
+            return "general"
+        
+        text = " ".join(msg.get("content", "") for msg in messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=[
+                    "programming", "data_science", "web_dev", "machine_learning",
+                    "devops", "database", "general"
+                ],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        domains = {
+            "exercise": ["exercise", "workout", "gym", "fitness", "yoga"],
+            "diet": ["diet", "nutrition", "food", "meal", "calories"],
+            "sleep": ["sleep", "rest", "nap", "bedtime", "waking up"],
+            "mood": ["mood", "anxiety", "depression", "stress", "anxiety"],
+            "health": ["health", "wellness", "fitness", "yoga", "meditation"],
+            "general": ["general", "chat", "conversation", "discussion", "question"],
+        }
+        
+        scores = {domain: sum(text_lower.count(keyword) for keyword in keywords) 
+                  for domain, keywords in domains.items()}
+        
+        max_domain = max(scores, key=scores.get)
+        if scores[max_domain] > 2:
+            return max_domain
+        return "general"
+
+    def _classify_urgency(self, messages: List[Dict[str, Any]]) -> str:
+        """Classify urgency level."""
+        if not messages:
+            return "normal"
+        
+        # Check first few messages for urgency
+        first_messages = messages[:3] if len(messages) >= 3 else messages
+        text = " ".join(msg.get("content", "") for msg in first_messages)
+        
+        if self.use_zero_shot:
+            return self._zero_shot_classify(
+                text,
+                candidate_labels=["urgent", "time_sensitive", "normal"],
+            )
+        
+        # Fallback to heuristics
+        text_lower = text.lower()
+        urgent_markers = ["urgent", "asap", "immediately", "emergency", "critical"]
+        time_markers = ["today", "tonight", "deadline", "soon"]
+        
+        urgent_score = sum(text_lower.count(marker) for marker in urgent_markers)
+        time_score = sum(text_lower.count(marker) for marker in time_markers)
+        
+        if urgent_score > 0:
+            return "urgent"
+        elif time_score > 0:
+            return "time_sensitive"
+        return "normal"
+
+    @staticmethod
+    def _classify_response_depth(assistant_avg_word_count: float, message_count: int) -> str:
+        """Classify the depth of assistant responses."""
+        if assistant_avg_word_count > 150:
+            return "detailed"
+        elif assistant_avg_word_count > 50:
+            return "moderate"
+        return "brief"
 
 
 def _count_emojis(text: str) -> int:

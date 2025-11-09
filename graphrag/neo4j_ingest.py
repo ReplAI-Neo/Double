@@ -107,8 +107,19 @@ class Neo4jGraphBuilder:
         conversations: Sequence[Dict[str, Any]] | Iterable[Dict[str, Any]],
         batch_size: int = 50,
         tag_generator: Optional[TagGenerator] = None,
+        use_zero_shot: bool = False,
+        zero_shot_model: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli",
     ) -> None:
-        tagger = tag_generator or TagGenerator()
+        if tag_generator is None:
+            device = -1  # CPU
+            if self.embedder and hasattr(self.embedder.model, 'device'):
+                # Try to use same device as embedder
+                embedder_device = str(self.embedder.model.device)
+                if 'cuda' in embedder_device:
+                    device = int(embedder_device.split(':')[1]) if ':' in embedder_device else 0
+            tagger = TagGenerator(use_zero_shot=use_zero_shot, zero_shot_model=zero_shot_model, device=device)
+        else:
+            tagger = tag_generator
         embedder = self.embedder
 
         for batch in chunked(conversations, batch_size):
@@ -214,6 +225,8 @@ class Neo4jGraphBuilder:
         for convo in conversations:
             derived = convo.get("derived", {})
             conversation_id = derived.get("conversation_id") or self._hash_conversation(convo)
+            
+            # Original tags
             source = convo.get("source")
             if source:
                 tag_rows.append(
@@ -243,6 +256,47 @@ class Neo4jGraphBuilder:
                         "conversation_id": conversation_id,
                     }
                 )
+            
+            # Semantic tags
+            semantic_tag_mappings = [
+                ("formality", "formality"),
+                ("information_content", "information_content"),
+                ("tone", "tone"),
+                ("sentiment", "sentiment"),
+                ("friendliness", "friendliness"),
+                ("purpose", "purpose"),
+                ("complexity", "complexity"),
+                ("resolution", "resolution"),
+                ("engagement", "engagement"),
+                ("domain", "domain"),
+                ("urgency", "urgency"),
+                ("response_depth", "response_depth"),
+            ]
+            
+            for field_name, category in semantic_tag_mappings:
+                value = derived.get(field_name)
+                if value:
+                    tag_rows.append(
+                        {
+                            "tag_id": f"{category}::{value}",
+                            "name": value,
+                            "category": category,
+                            "conversation_id": conversation_id,
+                        }
+                    )
+            
+            # Handle content_type (list of tags)
+            content_types = derived.get("content_type", [])
+            for content_type in content_types:
+                tag_rows.append(
+                    {
+                        "tag_id": f"content_type::{content_type}",
+                        "name": content_type,
+                        "category": "content_type",
+                        "conversation_id": conversation_id,
+                    }
+                )
+        
         if not tag_rows:
             return
         session.run(
@@ -465,6 +519,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-model", help="SentenceTransformer model name for embeddings")
     parser.add_argument("--embedding-device", help="Torch device, e.g. cpu or cuda")
     parser.add_argument("--no-normalize", action="store_true", help="Disable embedding normalization")
+    parser.add_argument("--use-zero-shot", action="store_true", help="Use zero-shot classification for semantic tags (slower but more accurate)")
+    parser.add_argument("--zero-shot-model", default="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli", help="Zero-shot model to use")
+    parser.add_argument("--no-semantic-tags", action="store_true", help="Disable semantic tagging (only basic tags)")
     return parser
 
 
@@ -509,7 +566,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         
         print(f"\nStarting ingestion (batch_size={args.batch_size})...")
         print("="*60)
-        builder.ingest(conversations, batch_size=args.batch_size)
+        
+        # Pass zero-shot settings
+        use_zero_shot = args.use_zero_shot if not args.no_semantic_tags else False
+        builder.ingest(
+            conversations, 
+            batch_size=args.batch_size,
+            use_zero_shot=use_zero_shot,
+            zero_shot_model=args.zero_shot_model,
+        )
+        
         print("\n" + "="*60)
         print(f"✓ Ingestion complete! Processed {builder._batch_counter} batches.")
         print("="*60)
