@@ -43,12 +43,12 @@ npm run send
 Start the conversational agent that monitors and responds to messages:
 
 ```bash
-npm run agent
+npm run agent-v3
 ```
 
 The agent will:
 
-- Monitor messages from the TARGET_PHONE number
+- Monitor messages across all iMessage chats
 - Generate responses using GPT-5-nano
 - Send responses automatically
 - Keep a conversation history for context
