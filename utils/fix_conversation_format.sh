@@ -1,0 +1,1 @@
+python utils/fix_conversation_format.py  train/LLaMA-Factory/data/replai.json data/training-data/replai.json --pretty
