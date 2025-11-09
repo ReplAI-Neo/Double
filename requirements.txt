@@ -4,4 +4,9 @@ cryptography>=41.0.0
 pytz>=2024.1
 datasets>=2.14.0
 huggingface-hub>=0.16.0
+networkx>=3.3
+numpy>=1.26.0
+pydantic>=2.7.0
+sentence-transformers>=3.0.0
+tqdm>=4.66.0
 
