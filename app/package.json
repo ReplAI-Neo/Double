@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "send": "tsx test_message.ts",
-    "agent": "tsx agent.ts"
+    "agent": "tsx agent.ts",
+    "test-reaction": "tsx test_reaction.ts"
   },
   "dependencies": {
     "@beeper/desktop-api": "^4.2.2",
