@@ -10,7 +10,7 @@ class Neo4jConnectionConfig:
     username: str
     password: str
     database: Optional[str] = None
-    encrypted: bool = True
+    encrypted: bool = False
 
 
 @dataclass
