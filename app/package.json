@@ -5,6 +5,7 @@
   "scripts": {
     "send": "tsx test_message.ts",
     "agent": "tsx agent.ts",
+    "agent-v2": "tsx agent_v2.ts",
     "test-reaction": "tsx test_reaction.ts"
   },
   "dependencies": {

@@ -43,6 +43,7 @@ inbox/
 # Data directories
 data/**/*.html
 data/**/*.json
+data/**/instagram/*
 
 train/LLaMA-Factory/data/*.json
 saves/
