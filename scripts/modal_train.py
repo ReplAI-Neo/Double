@@ -117,7 +117,7 @@ class TrainingConfig:
 
 
 # Data Processing Configuration
-CONVERSATION_COLUMN = "conversations"  # ShareGPT format column name
+CONVERSATION_COLUMN = "messages"  # ShareGPT format column name
 TEXT_COLUMN = "text"  # Output column for formatted text
 TRAIN_SPLIT_RATIO = 0.9  # 90% train, 10% eval split
 PREPROCESSING_WORKERS = 2
@@ -180,11 +180,22 @@ def load_or_cache_dataset(config: TrainingConfig, paths: dict, tokenizer):
             dataset = datasets.load_dataset(config.dataset_name, split="train")
 
         # Standardize to ShareGPT format if needed
-        if CONVERSATION_COLUMN in dataset.column_names:
+        # Check for both "conversations" and "messages" columns
+        has_conversations = "conversations" in dataset.column_names
+        has_messages = "messages" in dataset.column_names
+        
+        if has_conversations:
+            print("Found 'conversations' column, standardizing ShareGPT format...")
             dataset = standardize_sharegpt(dataset)
+            # After standardization, it should have "messages" column
+            if "messages" not in dataset.column_names:
+                print("Warning: Standardization didn't create 'messages' column")
+        elif has_messages:
+            print("Found 'messages' column, using as-is")
         else:
             # If not in ShareGPT format, assume it's already formatted
             # You may need to adjust this based on your dataset format
+            print(f"Dataset columns: {dataset.column_names}")
             print("Dataset not in ShareGPT format, using as-is")
 
         # Split into training and evaluation sets
@@ -195,7 +206,52 @@ def load_or_cache_dataset(config: TrainingConfig, paths: dict, tokenizer):
         eval_dataset = dataset["test"]
 
         # Apply chat template formatting
-        if CONVERSATION_COLUMN in train_dataset.column_names:
+        # Check for both "conversations" and "messages" columns
+        has_conversations_col = "conversations" in train_dataset.column_names
+        has_messages_col = "messages" in train_dataset.column_names
+        
+        if has_conversations_col or has_messages_col:
+            # Use the column that exists
+            conv_col = "messages" if has_messages_col else "conversations"
+            print(f"Formatting datasets with chat template using '{conv_col}' column...")
+            
+            # Create a wrapper function that uses the correct column
+            # Using non-batched processing for reliability
+            def format_single_conversation(example, tokenizer, column_name):
+                conversation = example[column_name]
+                try:
+                    formatted_text = tokenizer.apply_chat_template(
+                        conversation, tokenize=False, add_generation_prompt=False
+                    )
+                    if formatted_text is None:
+                        formatted_text = ""
+                except Exception as e:
+                    print(f"Error formatting conversation: {e}")
+                    formatted_text = ""
+                
+                return {TEXT_COLUMN: formatted_text}
+            
+            print("Processing train dataset (this may take a while)...")
+            train_dataset = train_dataset.map(
+                format_single_conversation,
+                fn_kwargs={"tokenizer": tokenizer, "column_name": conv_col},
+                remove_columns=[
+                    col
+                    for col in train_dataset.column_names
+                    if col != TEXT_COLUMN
+                ],
+                desc="Formatting training data",
+            )
+            print("Processing eval dataset...")
+            eval_dataset = eval_dataset.map(
+                format_single_conversation,
+                fn_kwargs={"tokenizer": tokenizer, "column_name": conv_col},
+                remove_columns=[
+                    col for col in eval_dataset.column_names if col != TEXT_COLUMN
+                ],
+                desc="Formatting eval data",
+            )
+        elif CONVERSATION_COLUMN in train_dataset.column_names:
             print("Formatting datasets with chat template...")
             train_dataset = train_dataset.map(
                 format_chat_template,
@@ -375,32 +431,41 @@ def finetune(config: TrainingConfig):
     training_args = create_training_arguments(config, output_dir)
 
     # Create trainer
-    # Determine the text field - use "text" if it exists, otherwise use formatting_func
-    dataset_text_field = None
-    formatting_func = None
+    # Verify dataset has the required "text" column after processing
+    print(f"Dataset columns after processing: {train_dataset.column_names}")
+    print(f"Number of training examples: {len(train_dataset)}")
+    print(f"Number of eval examples: {len(eval_dataset)}")
     
-    if TEXT_COLUMN in train_dataset.column_names:
-        # Dataset has been processed with chat template, use text field
-        dataset_text_field = TEXT_COLUMN
-        print(f"Using dataset_text_field: {dataset_text_field}")
-    elif CONVERSATION_COLUMN in train_dataset.column_names:
-        # Dataset has conversations, need formatting function
-        # Unsloth expects formatting_func to return a list of strings
-        def format_conversation(example):
-            """Format a single conversation using tokenizer's chat template."""
-            conversation = example[CONVERSATION_COLUMN]
-            formatted_text = tokenizer.apply_chat_template(
-                conversation, tokenize=False, add_generation_prompt=False
-            )
-            return [formatted_text]  # Return as list as Unsloth expects
-        
-        formatting_func = format_conversation
-        print("Using formatting_func for conversations")
-    else:
+    # Check if text column exists
+    if TEXT_COLUMN not in train_dataset.column_names:
         raise ValueError(
-            f"Dataset must have either '{TEXT_COLUMN}' or '{CONVERSATION_COLUMN}' column. "
-            f"Found columns: {train_dataset.column_names}"
+            f"Dataset does not have '{TEXT_COLUMN}' column after processing. "
+            f"Available columns: {train_dataset.column_names}. "
+            f"This suggests the chat template formatting failed."
         )
+    
+    # Verify text column has valid data
+    print(f"Checking first few examples in {TEXT_COLUMN} column...")
+    for i in range(min(3, len(train_dataset))):
+        sample = train_dataset[i]
+        text_value = sample[TEXT_COLUMN]
+        if not isinstance(text_value, str):
+            raise ValueError(f"Example {i}: {TEXT_COLUMN} column contains non-string: {type(text_value)}")
+        if not text_value or len(text_value) == 0:
+            raise ValueError(f"Example {i}: {TEXT_COLUMN} column is empty")
+        print(f"  Example {i}: {len(text_value)} characters, starts with: {text_value[:100]}...")
+    
+    # Use the text column for training
+    dataset_text_field = TEXT_COLUMN
+    formatting_func = None
+    print(f"✓ Using dataset_text_field='{dataset_text_field}' for training")
+    
+    # Create trainer with explicit parameters
+    print(f"Creating SFTTrainer with:")
+    print(f"  - dataset_text_field: {dataset_text_field}")
+    print(f"  - formatting_func: {formatting_func}")
+    print(f"  - packing: {config.packing}")
+    print(f"  - max_seq_length: {config.max_seq_length}")
     
     trainer = SFTTrainer(
         model=model,
@@ -408,10 +473,10 @@ def finetune(config: TrainingConfig):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset if not config.skip_eval else None,
         args=training_args,
+        dataset_text_field=dataset_text_field,  # Should be "text"
+        formatting_func=None,  # Don't use formatting_func since we have text column
         max_seq_length=config.max_seq_length,
         packing=config.packing,
-        dataset_text_field=dataset_text_field,
-        formatting_func=formatting_func,
     )
 
     # Train
