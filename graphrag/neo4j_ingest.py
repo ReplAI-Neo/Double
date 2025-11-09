@@ -43,12 +43,14 @@ class Neo4jGraphBuilder:
         )
         self._database = connection.database
         self.embedder = embedder
+        self._batch_counter = 0
 
     def close(self) -> None:
         self._driver.close()
 
     # Constraint / index helpers -------------------------------------------------
     def ensure_constraints(self) -> None:
+        print("Creating constraints...")
         statements = [
             "CREATE CONSTRAINT person_id_unique IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
             "CREATE CONSTRAINT conversation_id_unique IF NOT EXISTS FOR (c:Conversation) REQUIRE c.conversation_id IS UNIQUE",
@@ -58,6 +60,7 @@ class Neo4jGraphBuilder:
         with self._session() as session:
             for stmt in statements:
                 session.run(stmt)
+        print("✓ Constraints created")
 
     def ensure_vector_index(
         self,
@@ -67,16 +70,18 @@ class Neo4jGraphBuilder:
         node_label: str = "Message",
         similarity_function: str = "cosine",
     ) -> None:
+        print(f"Creating vector index '{index_name}' (dim={dimension})...")
         with self._session() as session:
             exists = session.run(
                 """
-                CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties
+                SHOW VECTOR INDEXES YIELD name
                 WHERE name = $index_name
                 RETURN name
                 """,
                 index_name=index_name,
             ).single()
             if exists:
+                print(f"✓ Vector index '{index_name}' already exists")
                 return
             session.run(
                 """
@@ -85,12 +90,7 @@ class Neo4jGraphBuilder:
                     $label,
                     $property,
                     $dimension,
-                    'hnsw',
-                    {
-                        similarityFunction: $similarity_function,
-                        efConstruction: 200,
-                        m: 16
-                    }
+                    $similarity_function
                 )
                 """,
                 index_name=index_name,
@@ -99,6 +99,7 @@ class Neo4jGraphBuilder:
                 dimension=dimension,
                 similarity_function=similarity_function,
             )
+        print(f"✓ Vector index '{index_name}' created")
 
     # Ingestion ------------------------------------------------------------------
     def ingest(
@@ -111,20 +112,30 @@ class Neo4jGraphBuilder:
         embedder = self.embedder
 
         for batch in chunked(conversations, batch_size):
+            self._batch_counter += 1
             enriched = tagger.enrich_corpus(batch)
+            
+            # Count messages in this batch
+            message_count = sum(len(c.get("full_metadata_messages", [])) for c in enriched)
+            print(f"\nProcessing batch {self._batch_counter} ({len(enriched)} conversations, {message_count} messages)...")
+            
             message_embeddings = None
             conversation_embeddings = None
             if embedder:
+                print(f"  Embedding {message_count} messages...")
                 message_embeddings = self._embed_message_batch(enriched, embedder)
+                print(f"  Embedding {len(enriched)} conversation summaries...")
                 conversation_embeddings = self._embed_conversation_batch(enriched, embedder)
 
             with self._session() as session:
+                print(f"  Writing to Neo4j...")
                 self._write_conversations(session, enriched, conversation_embeddings)
                 self._write_participants(session, enriched)
                 self._write_tags(session, enriched)
                 self._write_messages(session, enriched, message_embeddings)
                 self._write_follows(session, enriched)
                 self._write_sent_relationships(session, enriched)
+            print(f"  ✓ Batch {self._batch_counter} complete")
 
     # Internal writers -----------------------------------------------------------
     def _write_conversations(
@@ -461,7 +472,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
+    print(f"Loading conversations from {args.input}...")
     conversations = _load_conversations(args.input)
+    print(f"✓ Loaded {len(conversations)} conversations")
 
     connection = Neo4jConnectionConfig(
         uri=args.neo4j_uri,
@@ -472,16 +485,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     embedder = None
     if args.embedding_model:
+        print(f"\nLoading embedding model '{args.embedding_model}'...")
         config = EmbeddingConfig(
             model_name=args.embedding_model,
             device=args.embedding_device,
             normalize_embeddings=not args.no_normalize,
         )
         embedder = SentenceTransformerEmbedder(config)
+        print(f"✓ Model loaded (dimension={embedder.dimension}, device={embedder.model.device})")
 
     builder = Neo4jGraphBuilder(connection=connection, embedder=embedder)
     try:
         if args.ensure_constraints:
+            print("\n" + "="*60)
             builder.ensure_constraints()
             if embedder:
                 builder.ensure_vector_index(
@@ -489,7 +505,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     dimension=embedder.dimension,
                     property_name="embedding",
                 )
+            print("="*60)
+        
+        print(f"\nStarting ingestion (batch_size={args.batch_size})...")
+        print("="*60)
         builder.ingest(conversations, batch_size=args.batch_size)
+        print("\n" + "="*60)
+        print(f"✓ Ingestion complete! Processed {builder._batch_counter} batches.")
+        print("="*60)
     finally:
         builder.close()
 

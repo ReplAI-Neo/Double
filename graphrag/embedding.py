@@ -30,11 +30,9 @@ class SentenceTransformerEmbedder:
         embeddings = self.model.encode(
             list(texts),
             batch_size=self.config.batch_size,
-            normalize_embeddings=False,
+            normalize_embeddings=self.config.normalize_embeddings,
             convert_to_numpy=True,
         )
-        if self.config.normalize_embeddings and embeddings.size:
-            embeddings = util.normalize_embeddings(embeddings)
         return embeddings.astype(np.float32)
 
     def embed_single(self, text: str) -> List[float]:
