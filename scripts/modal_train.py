@@ -4,11 +4,12 @@ Modal training script for finetuning LLMs with Unsloth.
 Based on: https://modal.com/docs/examples/unsloth_finetune
 """
 
+import os
 import pathlib
 from dataclasses import dataclass
 from datetime import datetime
 import shutil
-from typing import Optional
+from typing import Dict, Optional
 
 import modal
 
@@ -44,7 +45,7 @@ with train_image.imports():
     from transformers import TrainingArguments
     from trl import SFTTrainer
     from unsloth import FastLanguageModel
-    from unsloth.chat_templates import standardize_sharegpt
+from unsloth.chat_templates import standardize_sharegpt
 
 # Volume Configuration
 model_cache_volume = modal.Volume.from_name(
@@ -58,7 +59,7 @@ checkpoint_volume = modal.Volume.from_name(
 )
 
 # GPU Configuration
-GPU_TYPE = "L40S"  # Good balance of VRAM, CUDA cores, and clock speed
+GPU_TYPE = "H100"  # Use single H100 for better availability
 TIMEOUT_HOURS = 6
 MAX_RETRIES = 3
 
@@ -82,8 +83,9 @@ class TrainingConfig:
     model_name: str
     dataset_name: str  # HuggingFace dataset name or local path
     max_seq_length: int
-    load_in_4bit: bool = True
+    load_in_4bit: bool = False
     load_in_8bit: bool = False
+    use_lora: bool = False
 
     # LoRA hyperparameters
     lora_r: int = 16
@@ -138,8 +140,6 @@ def load_or_cache_dataset(config: TrainingConfig, paths: dict, tokenizer):
         print(f"Loading dataset: {config.dataset_name}")
 
         # Check if it's a local file path (starts with / or contains .json)
-        import os
-
         is_local_file = (
             config.dataset_name.startswith("/")
             or config.dataset_name.endswith(".json")
@@ -225,6 +225,11 @@ def ensure_text_column(train_dataset, eval_dataset, tokenizer):
         return dataset is not None and TEXT_COLUMN in dataset.column_names
 
     if has_text(train_dataset) and (eval_dataset is None or has_text(eval_dataset)):
+        train_dataset = filter_empty_text_rows(train_dataset)
+        train_dataset = filter_tokenizable_text_rows(train_dataset, tokenizer)
+        if eval_dataset is not None:
+            eval_dataset = filter_empty_text_rows(eval_dataset)
+            eval_dataset = filter_tokenizable_text_rows(eval_dataset, tokenizer)
         return train_dataset, eval_dataset, False
 
     # Determine which conversation column we can use
@@ -293,7 +298,151 @@ def ensure_text_column(train_dataset, eval_dataset, tokenizer):
     if eval_dataset is not None and TEXT_COLUMN not in eval_dataset.column_names:
         raise ValueError("Failed to create text column in evaluation dataset after formatting.")
 
+    train_dataset = filter_empty_text_rows(train_dataset)
+    train_dataset = filter_tokenizable_text_rows(train_dataset, tokenizer)
+    if eval_dataset is not None:
+        eval_dataset = filter_empty_text_rows(eval_dataset)
+        eval_dataset = filter_tokenizable_text_rows(eval_dataset, tokenizer)
+
     return train_dataset, eval_dataset, True
+
+
+def filter_empty_text_rows(dataset):
+    """Drop rows whose formatted text is missing or empty."""
+
+    def is_nonempty_text(example):
+        text = example.get(TEXT_COLUMN, "")
+        return isinstance(text, str) and text.strip() != ""
+
+    original_len = len(dataset)
+    dataset = dataset.filter(is_nonempty_text)
+    filtered_len = len(dataset)
+    dropped = original_len - filtered_len
+    if dropped > 0:
+        print(f"Filtered out {dropped} empty {TEXT_COLUMN!r} rows (kept {filtered_len}).")
+    return dataset
+
+
+def filter_tokenizable_text_rows(dataset, tokenizer):
+    """Drop rows whose formatted text tokenizes to zero tokens."""
+
+    def has_tokens(example, tokenizer):
+        text = example.get(TEXT_COLUMN, "")
+        if not isinstance(text, str):
+            return False
+        tokens = tokenizer(
+            text,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=8,
+        )
+        input_ids = tokens.get("input_ids", [])
+        if isinstance(input_ids, (list, tuple)):
+            if len(input_ids) == 0:
+                return False
+            first_item = input_ids[0]
+            if isinstance(first_item, (list, tuple)):
+                return len(first_item) > 0
+            return True
+        return isinstance(input_ids, torch.Tensor) and input_ids.numel() > 0
+
+    original_len = len(dataset)
+    dataset = dataset.filter(
+        has_tokens,
+        fn_kwargs={"tokenizer": tokenizer},
+        desc="Filtering tokenless rows",
+    )
+    filtered_len = len(dataset)
+    dropped = original_len - filtered_len
+    if dropped > 0:
+        print(f"Filtered out {dropped} rows that tokenized to zero tokens (kept {filtered_len}).")
+    return dataset
+
+
+def inspect_first_batch(trainer, label: str = "train"):
+    """Log the shape/dtype of the first batch and guard against scalar tensors."""
+    dataloader = trainer.get_train_dataloader() if label == "train" else trainer.get_eval_dataloader()
+    try:
+        batch = next(iter(dataloader))
+    except StopIteration as exc:
+        raise ValueError(f"{label.title()} dataloader produced zero batches.") from exc
+
+    print(f"\n🔍 Inspecting first {label} batch:")
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            shape = tuple(value.shape)
+            print(f"  - {key}: shape={shape}, dtype={value.dtype}, dim={value.dim()}")
+            if value.dim() == 0:
+                raise RuntimeError(
+                    f"Batch tensor '{key}' is 0-dimensional. "
+                    "This usually means the dataset column is scalar after formatting."
+                )
+        else:
+            print(f"  - {key}: type={type(value)}")
+
+    # Force Trainer to rebuild the dataloader so training starts from the first batch.
+    if label == "train" and hasattr(trainer, "_train_dataloader"):
+        trainer._train_dataloader = None
+    if label == "eval" and hasattr(trainer, "_eval_dataloader"):
+        trainer._eval_dataloader = None
+
+
+def validate_batch_inputs(batch: Dict[str, torch.Tensor], stage: str) -> None:
+    """Ensure every tensor batch has at least one dimension (batch axis)."""
+    scalar_tensors = []
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor) and value.dim() == 0:
+            scalar_tensors.append(f"{key} (dtype={value.dtype}, value={value.item()})")
+
+    if scalar_tensors:
+        joined = "; ".join(scalar_tensors)
+        raise RuntimeError(
+            f"{stage} batch contains 0-D tensor inputs: {joined}. "
+            "This usually means a text row tokenized to an empty sequence. "
+            "Remove or fix these rows so every tensor has a batch dimension."
+        )
+
+
+class SafeSFTTrainer(SFTTrainer):
+    """SFTTrainer with extra validation to prevent scalar batches crashing DataParallel."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._debug_logged = {"train": 0, "eval": 0}
+        self._scalar_batch_fixes = 0
+
+    def _prepare_input(self, data):
+        data = super()._prepare_input(data)
+        if isinstance(data, torch.Tensor) and data.dim() == 0:
+            self._scalar_batch_fixes += 1
+            if self._scalar_batch_fixes <= 3:
+                msg = (
+                    "⚠️  Detected 0-D tensor during _prepare_input; unsqueezing to avoid DataParallel crash "
+                    f"(dtype={data.dtype}, value={data.item()})."
+                )
+                if self._scalar_batch_fixes == 3:
+                    msg += " Suppressing further warnings."
+                print(msg)
+            data = data.unsqueeze(0)
+        return data
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        stage = "Train" if self.model.training else "Eval"
+        validate_batch_inputs(inputs, stage)
+
+        stage_key = stage.lower()
+        if self._debug_logged.get(stage_key, 0) < 1:
+            print(f"\n🧪 {stage} batch summary right before compute_loss:")
+            for key, value in inputs.items():
+                if isinstance(value, torch.Tensor):
+                    print(f"  - {key}: shape={tuple(value.shape)}, dtype={value.dtype}, dim={value.dim()}")
+                else:
+                    print(f"  - {key}: type={type(value)}")
+            self._debug_logged[stage_key] = self._debug_logged.get(stage_key, 0) + 1
+
+        model_to_use = model.module if isinstance(model, torch.nn.DataParallel) else model
+
+        return super().compute_loss(model_to_use, inputs, return_outputs=return_outputs, **kwargs)
 
 
 def get_structured_paths(config: TrainingConfig):
@@ -315,6 +464,10 @@ def get_structured_paths(config: TrainingConfig):
 
 def setup_model_for_training(model, config: TrainingConfig):
     """Configure the model with LoRA adapters for efficient finetuning."""
+    if not config.use_lora:
+        print("LoRA disabled — training full model weights.")
+        return model
+
     print("Configuring LoRA for training...")
     model = FastLanguageModel.get_peft_model(
         model,
@@ -397,6 +550,14 @@ def check_for_existing_checkpoint(paths: dict):
 )
 def finetune(config: TrainingConfig):
     """Main training function."""
+    if not config.use_lora and (config.load_in_4bit or config.load_in_8bit):
+        raise ValueError(
+            "Full finetuning cannot load in 4-bit or 8-bit. "
+            "Set load_in_4bit=False and load_in_8bit=False when use_lora=False."
+        )
+    if not config.use_lora:
+        os.environ["UNSLOTH_ENABLE_FULL_FINETUNING"] = "1"
+
     # Generate experiment name if not provided
     if config.experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -408,7 +569,6 @@ def finetune(config: TrainingConfig):
 
     # Initialize wandb if enabled
     if config.enable_wandb:
-        import os
         wandb_api_key = os.environ.get("WANDB_API_KEY")
         if wandb_api_key:
             wandb.login(key=wandb_api_key)
@@ -433,6 +593,8 @@ def finetune(config: TrainingConfig):
         dtype=None,  # Auto-detect
         load_in_4bit=config.load_in_4bit,
         load_in_8bit=config.load_in_8bit,
+        use_gradient_checkpointing=config.use_gradient_checkpointing,
+        full_finetuning=not config.use_lora,
         trust_remote_code=True,
     )
 
@@ -489,7 +651,7 @@ def finetune(config: TrainingConfig):
     print(f"  - packing: {config.packing}")
     print(f"  - max_seq_length: {config.max_seq_length}")
 
-    trainer = SFTTrainer(
+    trainer = SafeSFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
@@ -500,6 +662,11 @@ def finetune(config: TrainingConfig):
         max_seq_length=config.max_seq_length,
         packing=config.packing,
     )
+
+    # Inspect the first batch to catch formatting issues before launching a long training job.
+    inspect_first_batch(trainer, label="train")
+    if not config.skip_eval and eval_dataset is not None:
+        inspect_first_batch(trainer, label="eval")
 
     # Train
     print("Starting training...")
@@ -529,8 +696,9 @@ def main(
     model_name: str = "NousResearch/Hermes-4-14B",
     dataset_name: str = "/data/training-data/replai.json",  # Local file path or HuggingFace dataset name
     max_seq_length: int = 131072,  # Match your train.sh cutoff_len
-    load_in_4bit: bool = True,
+    load_in_4bit: bool = False,
     load_in_8bit: bool = False,
+    use_lora: bool = False,
     # LoRA hyperparameters
     lora_r: int = 16,
     lora_alpha: int = 16,
@@ -567,6 +735,7 @@ def main(
         max_seq_length=max_seq_length,
         load_in_4bit=load_in_4bit,
         load_in_8bit=load_in_8bit,
+        use_lora=use_lora,
         lora_r=lora_r,
         lora_alpha=lora_alpha,
         lora_bias=lora_bias,
@@ -597,7 +766,10 @@ def main(
     print(f"Starting finetuning experiment: {config.experiment_name}")
     print(f"Model: {config.model_name}")
     print(f"Dataset: {config.dataset_name}")
-    print(f"LoRA configuration: rank={config.lora_r}, alpha={config.lora_alpha}")
+    if config.use_lora:
+        print(f"LoRA configuration: rank={config.lora_r}, alpha={config.lora_alpha}")
+    else:
+        print("LoRA disabled: running full-parameter finetuning.")
     print(
         f"Effective batch size: {config.batch_size * config.gradient_accumulation_steps}"
     )

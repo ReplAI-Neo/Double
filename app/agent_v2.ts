@@ -142,6 +142,28 @@ async function sendMessage(
   });
 }
 
+function splitAssistantResponse(response: string): string[] {
+  const parts: string[] = [];
+  const triplePipeSegments = response.split("|||");
+
+  for (const segment of triplePipeSegments) {
+    const doubleNewlinePieces = segment.split(/\n{2,}/);
+    for (const piece of doubleNewlinePieces) {
+      const trimmed = piece.trim();
+      if (trimmed.length > 0) {
+        parts.push(trimmed);
+      }
+    }
+  }
+
+  if (parts.length === 0) {
+    const fallback = response.trim();
+    return fallback ? [fallback] : ["👍"];
+  }
+
+  return parts;
+}
+
 function getOrCreateChatState(
   chatId: string,
   contactName: string,
@@ -203,20 +225,17 @@ async function processResponseQueue(
     });
 
     // Split and send messages
-    const messages = response.split("|||").map((m) => m.trim());
+    const messagesToSend = splitAssistantResponse(response);
 
-    for (let i = 0; i < messages.length; i++) {
-      if (messages[i]) {
-        await sendMessage(beeper, state.chatId, messages[i]);
-        console.log(
-          `🤖 To ${state.contactName} [${i + 1}/${messages.length}]: ${
-            messages[i]
-          }`
-        );
+    for (let i = 0; i < messagesToSend.length; i++) {
+      const messageText = messagesToSend[i];
+      await sendMessage(beeper, state.chatId, messageText);
+      console.log(
+        `🤖 To ${state.contactName} [${i + 1}/${messagesToSend.length}]: ${messageText}`
+      );
 
-        if (i < messages.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 1600));
-        }
+      if (i < messagesToSend.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1600));
       }
     }
   } catch (error: any) {
@@ -236,6 +255,8 @@ async function processResponseQueue(
 async function runAgent() {
   const beeperToken = process.env["BEEPER_ACCESS_TOKEN"];
   const openaiKey = process.env["OPENAI_API_KEY"];
+  // const openaiBaseUrl = process.env["OPENAI_BASE_URL"];
+
 
   if (!beeperToken || !openaiKey) {
     console.error("❌ Error: Missing BEEPER_ACCESS_TOKEN or OPENAI_API_KEY");
@@ -243,7 +264,13 @@ async function runAgent() {
   }
 
   const beeper = new BeeperDesktop({ accessToken: beeperToken });
-  const openai = new OpenAI({ apiKey: openaiKey });
+  // const openai = new OpenAI({ 
+  //   apiKey: openaiKey,
+  //   baseURL: openaiBaseUrl || "https://api.openai.com/v1"
+  // });
+  const openai = new OpenAI({ 
+    apiKey: openaiKey
+  });
 
   console.log("🤖 AI Agent V2 started");
   console.log("📱 Monitoring ALL chats for unread messages");

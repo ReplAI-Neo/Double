@@ -12,7 +12,18 @@ and converts them into proper alternating format by:
 import json
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+
+def join_message_content(role: Optional[str], content_parts: List[str]) -> str:
+    """
+    Join message chunks, using double newlines for assistant messages so they can
+    later be split back into individual texts.
+    """
+    if not content_parts:
+        return ""
+    separator = "\n\n" if role == "assistant" else "\n"
+    return separator.join(content_parts)
 
 
 def merge_consecutive_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -47,7 +58,7 @@ def merge_consecutive_messages(messages: List[Dict[str, Any]]) -> List[Dict[str,
             if current_content:
                 merged.append({
                     'role': current_role,
-                    'content': '\n'.join(current_content)
+                    'content': join_message_content(current_role, current_content)
                 })
             current_role = role
             current_content = [content]
@@ -56,7 +67,7 @@ def merge_consecutive_messages(messages: List[Dict[str, Any]]) -> List[Dict[str,
     if current_content:
         merged.append({
             'role': current_role,
-            'content': '\n'.join(current_content)
+            'content': join_message_content(current_role, current_content)
         })
     
     return merged
@@ -201,4 +212,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

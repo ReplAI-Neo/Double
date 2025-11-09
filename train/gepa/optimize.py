@@ -10,7 +10,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ENDPOINT_URL = os.environ.get("ENDPOINT_URL")
 
 # Configuration for the model
-HUGGINGFACE_MODEL_NAME = "Qwen/Qwen3-8B"
+HUGGINGFACE_MODEL_NAME = "NousResearch/Hermes-4-14B"
 
 # Configure DSPy LM for text generation
 lm = dspy.LM(f"openai/{HUGGINGFACE_MODEL_NAME}",
@@ -20,19 +20,16 @@ lm = dspy.LM(f"openai/{HUGGINGFACE_MODEL_NAME}",
 dspy.configure(lm=lm)
 
 
-def load_train_set(num_examples=100):
+def load_train_set(dataset_path="/data/training-data/replai.json", num_examples=100):
     """Load training data from HuggingFace dataset."""
-    print(f"Loading {num_examples} examples from HuggingFace...")
-    dataset = load_dataset("dmitva/human_ai_generated_text", split="train").select(range(num_examples))
+    print(f"Loading {num_examples} examples")
+    dataset = load_dataset("json", dataset_path).select(range(num_examples))
     
     train_examples = []
     for example in dataset:
         train_examples.append(
-            dspy.Example({
-                "prompts": example["instructions"],
-                "human_text": example["human_text"],
-                "ai_text": example["ai_text"],
-            }).with_inputs("prompts")
+            messages = example["messages"]
+            
         )
     return train_examples
 

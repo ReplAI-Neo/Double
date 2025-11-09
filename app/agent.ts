@@ -6,7 +6,7 @@ dotenv.config();
 
 // Configuration
 const TARGET_PHONE = process.env["TARGET_PHONE"];
-const POLL_INTERVAL_MS = 2000; // Check every 2 seconds
+const POLL_INTERVAL_MS = 3000; // Check every 3 seconds
 const SYSTEM_PROMPT = `You are texting casually with a friend. Keep it real and chill.
 
 Style:
@@ -136,6 +136,7 @@ async function runAgent() {
   // Initialize clients
   const beeperToken = process.env["BEEPER_ACCESS_TOKEN"];
   const openaiKey = process.env["OPENAI_API_KEY"];
+  const openaiBaseUrl = process.env["OPENAI_BASE_URL"];
 
   if (!beeperToken) {
     console.error("❌ Error: BEEPER_ACCESS_TOKEN not found in .env file");
@@ -148,7 +149,10 @@ async function runAgent() {
   }
 
   const beeper = new BeeperDesktop({ accessToken: beeperToken });
-  const openai = new OpenAI({ apiKey: openaiKey });
+  const openai = new OpenAI({ 
+    apiKey: openaiKey,
+    baseURL: openaiBaseUrl || "https://api.openai.com/v1"
+  });
 
   console.log("🤖 AI Agent started");
   console.log(`📱 Monitoring: ${TARGET_PHONE}`);
