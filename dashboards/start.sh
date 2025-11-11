@@ -1,1 +1,1 @@
-python style_dashboard.py --embedding-backend sentence-transformers
+cd "$(dirname "$0")/.." && python dashboards/style_dashboard.py --embedding-backend sentence-transformers
