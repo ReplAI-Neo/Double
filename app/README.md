@@ -49,7 +49,7 @@ npm run agent-v4
 The agent will:
 
 - Monitor messages across all iMessage chats
-- Generate responses using GPT-5-nano
+- Generate responses using GPT-5-mini
 - Send responses automatically
 - Keep a conversation history for context
 - Run continuously until you press Ctrl+C
